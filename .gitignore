@@ -1,0 +1,23 @@
+# Chrome profile data
+chrome_profile/
+
+# Screenshots
+*.png
+
+# Log files
+weight_log_*.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.env
+venv/
+.venv/
+
+# OS files
+.DS_Store
+Thumbs.db
