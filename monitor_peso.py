@@ -652,10 +652,10 @@ class WeightMonitor:
 
     def process_data(self, data):
         self.log_message(f"📊 Datos: {data}")
-        match = re.match(r'([A-Z]{2}),([A-Z]{2}),([+\-])\s*(\d+)kg', data)
+        match = re.match(r'([A-Z]{2}),([A-Z]{2}),([+\-])\s*([\d.]+)\s*kg', data)
         if match:
             status, weight_type, sign, weight = match.groups()
-            weight_value = int(weight)
+            weight_value = float(weight)
             self.root.after(0, self.update_display, weight_value, status, weight_type)
 
     def update_display(self, weight, status, weight_type):
