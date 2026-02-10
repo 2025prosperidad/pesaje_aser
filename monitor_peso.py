@@ -8,7 +8,6 @@ from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 from PIL import Image, ImageTk
 import io
 import time
@@ -177,11 +176,8 @@ class WeightMonitor:
 
             self.log_message(f"✓ Usando perfil: {temp_profile}")
 
-            # Usar webdriver-manager para descargar automáticamente ChromeDriver
-            self.driver = webdriver.Chrome(
-                service=Service(ChromeDriverManager().install()),
-                options=chrome_options
-            )
+            # Selenium 4+ detecta y descarga automáticamente el ChromeDriver correcto
+            self.driver = webdriver.Chrome(options=chrome_options)
 
             # Configurar ventana del navegador a un tamaño fijo para capturas eficientes
             self.driver.set_window_size(960, 540)

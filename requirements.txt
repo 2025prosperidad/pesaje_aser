@@ -1,5 +1,4 @@
 pyserial
 Pillow
 selenium
-webdriver-manager
 psutil
