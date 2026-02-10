@@ -5,15 +5,33 @@ import serial.tools.list_ports
 import threading
 import re
 from datetime import datetime
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from PIL import Image, ImageTk
-import io
 import time
 import os
 import psutil
+
+# Intentar importar tkwebview2 (solo disponible en Windows)
+USE_WEBVIEW2 = False
+try:
+    from tkwebview2.tkwebview2 import WebView2, have_runtime, install_runtime
+    USE_WEBVIEW2 = True
+except ImportError:
+    pass
+
+# Fallback: Selenium para sistemas sin WebView2
+USE_SELENIUM = False
+if not USE_WEBVIEW2:
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
+        from PIL import Image, ImageTk
+        import io
+        USE_SELENIUM = True
+    except ImportError:
+        pass
+
+HIK_CONNECT_URL = "https://www.hik-connect.com/views/login/index.html#/portal"
 
 class WeightMonitor:
     def __init__(self, root):
@@ -26,12 +44,20 @@ class WeightMonitor:
         self.is_running = False
         self.current_weight = 0
         self.status = "ST"
+        self.webview = None
         self.driver = None
-        self.browser_frame = None
 
         self.setup_ui()
         self.log_message("=== INICIANDO APLICACIÓN ===")
-        self.root.after(1000, self.init_selenium)
+
+        if USE_WEBVIEW2:
+            self.log_message("✓ Usando WebView2 (tiempo real)")
+            self.root.after(500, self.init_webview2)
+        elif USE_SELENIUM:
+            self.log_message("⚠ WebView2 no disponible, usando Selenium (fallback)")
+            self.root.after(1000, self.init_selenium)
+        else:
+            self.log_message("❌ No hay motor de navegador disponible")
 
     def setup_ui(self):
         # Frame superior - Configuración
@@ -118,19 +144,19 @@ class WeightMonitor:
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # === LADO DERECHO: Navegador Embebido ===
-        right_container = tk.Frame(main_horizontal_frame, bg="#2d2d2d")
-        right_container.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-        
+        self.right_container = tk.Frame(main_horizontal_frame, bg="#2d2d2d")
+        self.right_container.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
         # Título
-        title_frame = tk.Frame(right_container, bg="#2d2d2d", height=30)
+        title_frame = tk.Frame(self.right_container, bg="#2d2d2d", height=30)
         title_frame.pack(fill=tk.X, side=tk.TOP)
         title_frame.pack_propagate(False)
-        tk.Label(title_frame, text="Hik-Connect - Tiempo Real", 
+        tk.Label(title_frame, text="Hik-Connect - Tiempo Real",
                 bg="#2d2d2d", fg="white", font=("Arial", 11, "bold")).pack(pady=5)
 
-        # Área para mostrar el navegador embebido - USAR CANVAS
-        self.browser_canvas = tk.Canvas(right_container, bg="black", highlightthickness=0)
-        self.browser_canvas.pack(fill=tk.BOTH, expand=True)
+        # Contenedor del navegador (se llenará con WebView2 o Canvas según disponibilidad)
+        self.browser_container = tk.Frame(self.right_container, bg="black")
+        self.browser_container.pack(fill=tk.BOTH, expand=True)
 
         # Botones inferiores
         btn_frame = tk.Frame(self.root, bg="#1e1e1e")
@@ -142,34 +168,159 @@ class WeightMonitor:
         tk.Button(btn_frame, text="Guardar Datos", command=self.save_log,
                  bg="#3d3d3d", fg="white").pack(side=tk.LEFT, padx=5)
 
+    # =============================================
+    # WebView2 - Navegador embebido en tiempo real
+    # =============================================
+    def init_webview2(self):
+        """Inicializa el navegador WebView2 embebido (solo Windows)"""
+        try:
+            self.log_message("🌐 Iniciando navegador WebView2...")
+
+            # Verificar si el runtime de WebView2 está instalado
+            if not have_runtime():
+                self.log_message("⏬ Instalando WebView2 Runtime...")
+                install_runtime()
+                self.log_message("✓ WebView2 Runtime instalado")
+
+            # Forzar actualización para obtener dimensiones
+            self.root.update_idletasks()
+            w = self.browser_container.winfo_width()
+            h = self.browser_container.winfo_height()
+            if w <= 1:
+                w = 800
+            if h <= 1:
+                h = 600
+
+            # Crear widget WebView2 dentro del contenedor
+            self.webview = WebView2(self.browser_container, width=w, height=h, url=HIK_CONNECT_URL)
+            self.webview.pack(fill=tk.BOTH, expand=True)
+
+            self.log_message("✓ Navegador WebView2 iniciado correctamente (tiempo real)")
+
+        except Exception as e:
+            self.log_message(f"❌ Error al iniciar WebView2: {e}")
+            # Mostrar error en la interfaz
+            error_label = tk.Label(self.browser_container,
+                text=f"Error al iniciar navegador WebView2:\n{str(e)}\n\nInstale tkwebview2: pip install tkwebview2",
+                bg="black", fg="red", font=("Arial", 12), wraplength=500)
+            error_label.pack(expand=True)
+
+    # =============================================
+    # Selenium - Fallback para sistemas sin WebView2
+    # =============================================
+    def init_selenium(self):
+        try:
+            self.log_message("🌐 Iniciando navegador Chrome (Selenium fallback)...")
+            chrome_options = Options()
+
+            # Crear carpeta temporal para perfil de Chrome
+            temp_profile = os.path.join(os.getcwd(), "chrome_profile")
+            if not os.path.exists(temp_profile):
+                os.makedirs(temp_profile)
+
+            # Configurar Chrome con perfil temporal persistente
+            chrome_options.add_argument(f"--user-data-dir={temp_profile}")
+            chrome_options.add_argument("--start-maximized")
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_options.add_experimental_option('useAutomationExtension', False)
+
+            self.log_message(f"✓ Usando perfil: {temp_profile}")
+
+            # Crear Canvas para mostrar screenshots (fallback)
+            self.browser_canvas = tk.Canvas(self.browser_container, bg="black", highlightthickness=0)
+            self.browser_canvas.pack(fill=tk.BOTH, expand=True)
+
+            # Usar webdriver-manager para descargar automáticamente ChromeDriver
+            self.driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()),
+                options=chrome_options
+            )
+            self.driver.get(HIK_CONNECT_URL)
+
+            self.log_message("✓ Navegador Chrome iniciado (modo screenshot cada 1s)")
+            self.update_browser_view()
+
+        except Exception as e:
+            self.log_message(f"❌ Error al iniciar Selenium: {e}")
+            if not hasattr(self, 'browser_canvas'):
+                self.browser_canvas = tk.Canvas(self.browser_container, bg="black", highlightthickness=0)
+                self.browser_canvas.pack(fill=tk.BOTH, expand=True)
+            self.browser_canvas.delete("all")
+            self.browser_canvas.create_text(
+                self.browser_canvas.winfo_width()//2,
+                self.browser_canvas.winfo_height()//2,
+                text=f"Error al iniciar navegador:\n{str(e)}",
+                fill="red",
+                font=("Arial", 12)
+            )
+
+    def update_browser_view(self):
+        """Actualización por screenshots (solo se usa con Selenium fallback)"""
+        try:
+            if self.driver:
+                # Forzar actualización de geometría
+                self.root.update_idletasks()
+
+                # Obtener dimensiones actuales del canvas
+                canvas_width = self.browser_canvas.winfo_width()
+                canvas_height = self.browser_canvas.winfo_height()
+
+                # Si el canvas aún no tiene dimensiones válidas, esperar y reintentar
+                if canvas_width <= 1 or canvas_height <= 1:
+                    self.root.after(500, self.update_browser_view)
+                    return
+
+                # Capturar pantalla del navegador
+                screenshot = self.driver.get_screenshot_as_png()
+                image = Image.open(io.BytesIO(screenshot))
+
+                # Redimensionar para llenar todo el espacio disponible
+                image = image.resize((canvas_width, canvas_height), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(image)
+
+                # Limpiar canvas y dibujar imagen
+                self.browser_canvas.delete("all")
+                self.browser_canvas.create_image(0, 0, image=photo, anchor=tk.NW)
+                self.browser_canvas.image = photo  # Mantener referencia
+
+                self.root.after(1000, self.update_browser_view)
+        except Exception as e:
+            self.log_message(f"⚠ Error al actualizar vista del navegador: {e}")
+
+    # =============================================
+    # Puertos seriales
+    # =============================================
     def force_free_selected_port(self):
         """Liberar específicamente el puerto seleccionado de forma AGRESIVA"""
         port = self.port_combo.get()
         if not port:
             messagebox.showwarning("Sin Puerto", "Selecciona primero un puerto COM")
             return
-        
+
         try:
             self.log_message(f"🔓 ═══ LIBERACIÓN AGRESIVA DE {port} ═══")
-            
+
             # PASO 1: Desconectar si está conectado
             if self.is_running:
                 self.log_message("⏹ Deteniendo conexión activa...")
                 self.disconnect()
                 time.sleep(0.5)
-            
+
             # PASO 2: Buscar y MATAR todos los procesos Python
             self.log_message("🔨 Buscando procesos que bloquean el puerto...")
             current_pid = os.getpid()
             killed_processes = []
-            
+
             for proc in psutil.process_iter(['pid', 'name', 'exe']):
                 try:
                     if proc.info['pid'] == current_pid:
                         continue
-                    
+
                     proc_name = proc.info['name'].lower()
-                    
+
                     # Matar TODOS los procesos Python excepto este
                     if 'python' in proc_name:
                         try:
@@ -179,12 +330,12 @@ class WeightMonitor:
                             time.sleep(0.2)
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             pass
-                            
+
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     pass
-            
+
             time.sleep(1)
-            
+
             # PASO 3: Intentar forzar apertura/cierre del puerto
             self.log_message(f"🔄 Forzando ciclos de apertura/cierre en {port}...")
             freed = False
@@ -200,10 +351,10 @@ class WeightMonitor:
                     if i == 9:
                         self.log_message(f"❌ Ciclo {i+1}/10: Falló - {str(e)[:30]}")
                     time.sleep(0.1)
-            
+
             # PASO 4: Actualizar lista de puertos
             self.refresh_ports()
-            
+
             # Resultado
             if killed_processes or freed:
                 result_msg = f"✅ Puerto {port} liberado!\n\n"
@@ -213,12 +364,12 @@ class WeightMonitor:
                         result_msg += f"• {p}\n"
                 if freed:
                     result_msg += f"\n✓ Puerto respondió correctamente"
-                
+
                 self.log_message(f"✅ Liberación completada: {len(killed_processes)} procesos eliminados")
                 messagebox.showinfo("Puerto Liberado", result_msg + "\n\nAhora intenta CONECTAR")
             else:
                 self.log_message("⚠ No se pudo liberar el puerto automáticamente")
-                messagebox.showwarning("Liberación Manual", 
+                messagebox.showwarning("Liberación Manual",
                     f"No se liberó el puerto automáticamente.\n\n"
                     f"ACCIÓN REQUERIDA:\n\n"
                     f"1. DESCONECTA el cable USB\n"
@@ -226,10 +377,10 @@ class WeightMonitor:
                     f"3. RECONECTA el cable USB\n"
                     f"4. Presiona 🔄 para actualizar\n"
                     f"5. Intenta Conectar nuevamente")
-            
+
         except Exception as e:
             self.log_message(f"❌ Error crítico al liberar puerto: {str(e)}")
-            messagebox.showerror("Error Crítico", 
+            messagebox.showerror("Error Crítico",
                 f"Error al liberar puerto:\n{str(e)}\n\n"
                 f"SOLUCIÓN:\n"
                 f"1. Desconecta el cable USB\n"
@@ -254,13 +405,13 @@ class WeightMonitor:
             if self.is_running:
                 self.disconnect()
                 time.sleep(0.5)
-            
+
             self.log_message("🔄 Reiniciando puertos COM...")
-            
+
             # Forzar cierre de cualquier conexión serial abierta en todos los puertos COM
             import serial.tools.list_ports
             ports = [port.device for port in serial.tools.list_ports.comports()]
-            
+
             freed_count = 0
             for port in ports:
                 try:
@@ -272,22 +423,22 @@ class WeightMonitor:
                     time.sleep(0.1)
                 except Exception as e:
                     self.log_message(f"⚠ {port}: {str(e)[:50]}")
-            
+
             time.sleep(0.5)
-            
+
             # Cerrar todos los procesos que puedan estar usando puertos COM
             current_pid = os.getpid()
             killed_count = 0
-            
+
             try:
                 for proc in psutil.process_iter(['pid', 'name']):
                     try:
                         # No matar el proceso actual
                         if proc.info['pid'] == current_pid:
                             continue
-                        
+
                         proc_name = proc.info['name'].lower()
-                        
+
                         # Buscar procesos relacionados con puertos seriales
                         if any(keyword in proc_name for keyword in ['python', 'serial', 'arduino', 'putty', 'terminal', 'com']):
                             try:
@@ -300,7 +451,7 @@ class WeightMonitor:
                                             break
                                 except (psutil.AccessDenied, psutil.NoSuchProcess):
                                     pass
-                                
+
                                 # Si tiene puerto COM abierto, terminarlo
                                 if has_com_port:
                                     proc.terminate()
@@ -310,32 +461,32 @@ class WeightMonitor:
                                         proc.kill()
                                     killed_count += 1
                                     self.log_message(f"✓ Proceso terminado: {proc.info['name']} (PID: {proc.info['pid']})")
-                                    
+
                             except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.TimeoutExpired):
                                 pass
-                                
+
                     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                         pass
             except Exception as e:
                 self.log_message(f"⚠ Error al buscar procesos: {str(e)[:50]}")
-            
+
             time.sleep(1)
-            
+
             # Refrescar lista de puertos
             self.refresh_ports()
-            
+
             total_actions = freed_count + killed_count
-            
+
             if total_actions > 0:
                 self.log_message(f"✓ Puertos reiniciados: {freed_count} liberado(s), {killed_count} proceso(s) terminado(s).")
-                messagebox.showinfo("Puertos Reiniciados", 
+                messagebox.showinfo("Puertos Reiniciados",
                                    f"Resultado:\n"
                                    f"• {freed_count} puerto(s) liberado(s)\n"
                                    f"• {killed_count} proceso(s) terminado(s)\n\n"
                                    f"Intenta conectar nuevamente.")
             else:
                 self.log_message("ℹ No se pudo liberar ningún puerto automáticamente.")
-                response = messagebox.askyesno("Acción Manual Requerida", 
+                response = messagebox.askyesno("Acción Manual Requerida",
                                    "No se pudieron liberar los puertos automáticamente.\n\n"
                                    "SOLUCIÓN:\n"
                                    "1. Desconecta el cable USB del dispositivo\n"
@@ -345,96 +496,10 @@ class WeightMonitor:
                                    "cerrar procesos manualmente?")
                 if response:
                     os.system('taskmgr')
-                
+
         except Exception as e:
             self.log_message(f"❌ Error al reiniciar puertos: {str(e)}")
             messagebox.showerror("Error", f"Error al reiniciar puertos:\n{str(e)}")
-
-    def get_chrome_user_data_dir(self):
-        """Obtiene la ruta del perfil principal de Chrome"""
-        if os.name == 'nt':  # Windows
-            appdata = os.environ.get('LOCALAPPDATA')
-            return os.path.join(appdata, 'Google', 'Chrome', 'User Data')
-        elif os.name == 'posix':  # Linux/Mac
-            if 'darwin' in os.sys.platform:  # Mac
-                return os.path.expanduser('~/Library/Application Support/Google/Chrome')
-            else:  # Linux
-                return os.path.expanduser('~/.config/google-chrome')
-        return None
-
-    def init_selenium(self):
-        try:
-            self.log_message("🌐 Iniciando navegador Chrome...")
-            chrome_options = Options()
-            
-            # Crear carpeta temporal para perfil de Chrome
-            temp_profile = os.path.join(os.getcwd(), "chrome_profile")
-            if not os.path.exists(temp_profile):
-                os.makedirs(temp_profile)
-            
-            # Configurar Chrome con perfil temporal persistente
-            chrome_options.add_argument(f"--user-data-dir={temp_profile}")
-            chrome_options.add_argument("--start-maximized")
-            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            chrome_options.add_experimental_option('useAutomationExtension', False)
-
-            self.log_message(f"✓ Usando perfil: {temp_profile}")
-
-            # Usar webdriver-manager para descargar automáticamente ChromeDriver
-            self.driver = webdriver.Chrome(
-                service=Service(ChromeDriverManager().install()), 
-                options=chrome_options
-            )
-            self.driver.get("https://www.hik-connect.com/views/login/index.html#/portal")
-
-            self.log_message("✓ Navegador iniciado correctamente. La sesión se guardará.")
-            self.update_browser_view()
-            
-        except Exception as e:
-            self.log_message(f"❌ Error al iniciar Selenium: {e}")
-            self.browser_canvas.delete("all")
-            self.browser_canvas.create_text(
-                self.browser_canvas.winfo_width()//2, 
-                self.browser_canvas.winfo_height()//2,
-                text=f"Error al iniciar navegador:\n{str(e)}", 
-                fill="red", 
-                font=("Arial", 12)
-            )
-
-    def update_browser_view(self):
-        try:
-            if self.driver:
-                # Forzar actualización de geometría
-                self.root.update_idletasks()
-                
-                # Obtener dimensiones actuales del canvas
-                canvas_width = self.browser_canvas.winfo_width()
-                canvas_height = self.browser_canvas.winfo_height()
-                
-                # Si el canvas aún no tiene dimensiones válidas, esperar y reintentar
-                if canvas_width <= 1 or canvas_height <= 1:
-                    self.root.after(500, self.update_browser_view)
-                    return
-                
-                # Capturar pantalla del navegador
-                screenshot = self.driver.get_screenshot_as_png()
-                image = Image.open(io.BytesIO(screenshot))
-                
-                # Redimensionar para llenar todo el espacio disponible
-                image = image.resize((canvas_width, canvas_height), Image.LANCZOS)
-                photo = ImageTk.PhotoImage(image)
-                
-                # Limpiar canvas y dibujar imagen
-                self.browser_canvas.delete("all")
-                self.browser_canvas.create_image(0, 0, image=photo, anchor=tk.NW)
-                self.browser_canvas.image = photo  # Mantener referencia
-                
-                self.root.after(1000, self.update_browser_view)
-        except Exception as e:
-            self.log_message(f"⚠ Error al actualizar vista del navegador: {e}")
 
     def toggle_connection(self):
         if not self.is_running:
@@ -446,7 +511,7 @@ class WeightMonitor:
         """Forzar cierre de un puerto específico"""
         try:
             self.log_message(f"🔨 Forzando cierre de {port}...")
-            
+
             # Método 1: Cerrar si hay puerto serial activo en esta instancia
             if self.serial_port:
                 try:
@@ -457,7 +522,7 @@ class WeightMonitor:
                     time.sleep(0.3)
                 except:
                     pass
-            
+
             # Método 2: Intentar abrir y cerrar múltiples veces
             for i in range(3):
                 try:
@@ -468,22 +533,22 @@ class WeightMonitor:
                     self.log_message(f"✓ Ciclo de apertura/cierre {i+1} exitoso")
                 except:
                     pass
-            
+
             # Método 3: Buscar procesos usando el puerto (excepto este)
             current_pid = os.getpid()
             killed = False
-            
+
             try:
                 for proc in psutil.process_iter(['pid', 'name']):
                     try:
                         if proc.info['pid'] == current_pid:
                             continue
-                        
+
                         proc_name = proc.info['name'].lower()
                         # Solo buscar procesos relacionados con serial
                         if 'python' not in proc_name:
                             continue
-                        
+
                         # Verificar archivos abiertos
                         try:
                             for item in proc.open_files():
@@ -495,18 +560,18 @@ class WeightMonitor:
                                     break
                         except (psutil.AccessDenied, AttributeError):
                             pass
-                            
+
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
             except Exception as e:
                 self.log_message(f"⚠ Error buscando procesos: {str(e)[:40]}")
-            
+
             if killed:
                 time.sleep(0.5)
                 self.log_message(f"✓ Puerto {port} debería estar libre ahora")
-            
+
             return True
-            
+
         except Exception as e:
             self.log_message(f"⚠ Error en force_close_port: {str(e)[:50]}")
             return False
@@ -514,11 +579,11 @@ class WeightMonitor:
     def connect(self):
         try:
             port = self.port_combo.get()
-            
+
             if not port:
                 messagebox.showwarning("Sin Puerto", "Por favor seleccione un puerto COM")
                 return
-            
+
             baud = int(self.baud_combo.get())
 
             # PASO 1: Asegurarse de que no hay conexión previa
@@ -534,7 +599,7 @@ class WeightMonitor:
 
             # PASO 2: UN SOLO intento de conexión directa
             self.log_message(f"📡 Intentando abrir {port} @ {baud} baud...")
-            
+
             self.serial_port = serial.Serial(
                 port=port,
                 baudrate=baud,
@@ -563,7 +628,7 @@ class WeightMonitor:
         except serial.SerialException as e:
             error_msg = str(e)
             self.log_message(f"❌ Error de conexión: {error_msg}")
-            
+
             # Limpiar cualquier referencia
             if self.serial_port:
                 try:
@@ -571,9 +636,9 @@ class WeightMonitor:
                 except:
                     pass
                 self.serial_port = None
-            
+
             # NO PREGUNTAR SI REINTENTAR - Mostrar opciones claras
-            messagebox.showerror("Puerto Bloqueado", 
+            messagebox.showerror("Puerto Bloqueado",
                 f"❌ NO SE PUDO CONECTAR A {port}\n\n"
                 f"El puerto está siendo usado por otro programa.\n\n"
                 f"SOLUCIONES (en orden):\n\n"
@@ -583,7 +648,7 @@ class WeightMonitor:
                 f"3️⃣ Cierra este programa completamente (X)\n"
                 f"    y ábrelo de nuevo\n\n"
                 f"4️⃣ Reinicia Windows si nada funciona")
-                
+
         except Exception as e:
             self.log_message(f"❌ Error inesperado: {str(e)}")
             if self.serial_port:
@@ -596,12 +661,12 @@ class WeightMonitor:
 
     def disconnect(self):
         self.is_running = False
-        
+
         # Esperar a que el thread de lectura termine
         if hasattr(self, 'read_thread') and self.read_thread and self.read_thread.is_alive():
             self.log_message("⏳ Esperando cierre del thread de lectura...")
             self.read_thread.join(timeout=2)
-        
+
         # Cerrar puerto con múltiples intentos
         if self.serial_port:
             for attempt in range(3):
@@ -616,7 +681,7 @@ class WeightMonitor:
                         time.sleep(0.2)
                     else:
                         self.log_message(f"❌ Error al cerrar puerto: {str(e)}")
-            
+
             # Liberar la referencia
             self.serial_port = None
             time.sleep(0.3)
@@ -689,19 +754,19 @@ class WeightMonitor:
     def cleanup_all_connections(self):
         """Limpia todas las conexiones al cerrar la aplicación"""
         self.log_message("🔄 Cerrando aplicación y liberando recursos...")
-        
+
         # Desconectar puerto serial
         if self.is_running:
             self.disconnect()
-        
-        # Cerrar navegador
+
+        # Cerrar navegador Selenium si se usó como fallback
         if self.driver:
             try:
                 self.driver.quit()
-                self.log_message("✓ Navegador cerrado")
+                self.log_message("✓ Navegador Selenium cerrado")
             except:
                 pass
-        
+
         # Pequeña pausa para asegurar que todo se cierre
         time.sleep(0.5)
 

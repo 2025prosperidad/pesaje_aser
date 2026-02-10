@@ -1,5 +1,7 @@
 pyserial
+psutil
+tkwebview2
+# Fallback para sistemas sin WebView2 (macOS/Linux)
 Pillow
 selenium
 webdriver-manager
-psutil
