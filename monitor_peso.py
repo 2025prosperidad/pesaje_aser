@@ -154,13 +154,7 @@ class WeightMonitor:
             self.log_message("🌐 Iniciando navegador Chrome...")
             chrome_options = Options()
 
-            # Crear carpeta temporal para perfil de Chrome
-            temp_profile = os.path.join(os.getcwd(), "chrome_profile")
-            if not os.path.exists(temp_profile):
-                os.makedirs(temp_profile)
-
             # Configurar Chrome optimizado para capturas rápidas
-            chrome_options.add_argument(f"--user-data-dir={temp_profile}")
             chrome_options.add_argument("--start-maximized")
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
             chrome_options.add_argument("--no-sandbox")
@@ -173,8 +167,6 @@ class WeightMonitor:
             chrome_options.add_argument("--disable-renderer-backgrounding")
             chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
             chrome_options.add_experimental_option('useAutomationExtension', False)
-
-            self.log_message(f"✓ Usando perfil: {temp_profile}")
 
             # Selenium 4+ detecta y descarga automáticamente el ChromeDriver correcto
             self.driver = webdriver.Chrome(options=chrome_options)
