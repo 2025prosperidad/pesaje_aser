@@ -5,33 +5,21 @@ import serial.tools.list_ports
 import threading
 import re
 from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+from PIL import Image, ImageTk
+import io
 import time
 import os
 import psutil
 
-# Intentar importar tkwebview2 (solo disponible en Windows)
-USE_WEBVIEW2 = False
-try:
-    from tkwebview2.tkwebview2 import WebView2, have_runtime, install_runtime
-    USE_WEBVIEW2 = True
-except ImportError:
-    pass
-
-# Fallback: Selenium para sistemas sin WebView2
-USE_SELENIUM = False
-if not USE_WEBVIEW2:
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.chrome.service import Service
-        from webdriver_manager.chrome import ChromeDriverManager
-        from PIL import Image, ImageTk
-        import io
-        USE_SELENIUM = True
-    except ImportError:
-        pass
-
 HIK_CONNECT_URL = "https://www.hik-connect.com/views/login/index.html#/portal"
+
+# Intervalo de actualización del navegador en milisegundos
+# 200ms = ~5 FPS (buena fluidez para video)
+BROWSER_REFRESH_MS = 200
 
 class WeightMonitor:
     def __init__(self, root):
@@ -44,20 +32,14 @@ class WeightMonitor:
         self.is_running = False
         self.current_weight = 0
         self.status = "ST"
-        self.webview = None
         self.driver = None
+        self.browser_running = False
+        self._screenshot_lock = threading.Lock()
+        self._latest_photo = None
 
         self.setup_ui()
         self.log_message("=== INICIANDO APLICACIÓN ===")
-
-        if USE_WEBVIEW2:
-            self.log_message("✓ Usando WebView2 (tiempo real)")
-            self.root.after(500, self.init_webview2)
-        elif USE_SELENIUM:
-            self.log_message("⚠ WebView2 no disponible, usando Selenium (fallback)")
-            self.root.after(1000, self.init_selenium)
-        else:
-            self.log_message("❌ No hay motor de navegador disponible")
+        self.root.after(1000, self.init_selenium)
 
     def setup_ui(self):
         # Frame superior - Configuración
@@ -77,7 +59,7 @@ class WeightMonitor:
         self.btn_refresh = tk.Button(config_frame, text="🔄", command=self.refresh_ports, bg="#3d3d3d", fg="white", width=3)
         self.btn_refresh.grid(row=0, column=4, padx=2)
 
-        # NUEVO: Botón para liberar puerto específico
+        # Botón para liberar puerto específico
         self.btn_force_free = tk.Button(config_frame, text="🔓 Liberar", command=self.force_free_selected_port,
                                        bg="#9c27b0", fg="white", width=10, font=("Arial", 9, "bold"))
         self.btn_force_free.grid(row=0, column=5, padx=5)
@@ -144,19 +126,19 @@ class WeightMonitor:
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # === LADO DERECHO: Navegador Embebido ===
-        self.right_container = tk.Frame(main_horizontal_frame, bg="#2d2d2d")
-        self.right_container.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        right_container = tk.Frame(main_horizontal_frame, bg="#2d2d2d")
+        right_container.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
         # Título
-        title_frame = tk.Frame(self.right_container, bg="#2d2d2d", height=30)
+        title_frame = tk.Frame(right_container, bg="#2d2d2d", height=30)
         title_frame.pack(fill=tk.X, side=tk.TOP)
         title_frame.pack_propagate(False)
         tk.Label(title_frame, text="Hik-Connect - Tiempo Real",
                 bg="#2d2d2d", fg="white", font=("Arial", 11, "bold")).pack(pady=5)
 
-        # Contenedor del navegador (se llenará con WebView2 o Canvas según disponibilidad)
-        self.browser_container = tk.Frame(self.right_container, bg="black")
-        self.browser_container.pack(fill=tk.BOTH, expand=True)
+        # Área para mostrar el navegador embebido
+        self.browser_canvas = tk.Canvas(right_container, bg="black", highlightthickness=0)
+        self.browser_canvas.pack(fill=tk.BOTH, expand=True)
 
         # Botones inferiores
         btn_frame = tk.Frame(self.root, bg="#1e1e1e")
@@ -168,49 +150,9 @@ class WeightMonitor:
         tk.Button(btn_frame, text="Guardar Datos", command=self.save_log,
                  bg="#3d3d3d", fg="white").pack(side=tk.LEFT, padx=5)
 
-    # =============================================
-    # WebView2 - Navegador embebido en tiempo real
-    # =============================================
-    def init_webview2(self):
-        """Inicializa el navegador WebView2 embebido (solo Windows)"""
-        try:
-            self.log_message("🌐 Iniciando navegador WebView2...")
-
-            # Verificar si el runtime de WebView2 está instalado
-            if not have_runtime():
-                self.log_message("⏬ Instalando WebView2 Runtime...")
-                install_runtime()
-                self.log_message("✓ WebView2 Runtime instalado")
-
-            # Forzar actualización para obtener dimensiones
-            self.root.update_idletasks()
-            w = self.browser_container.winfo_width()
-            h = self.browser_container.winfo_height()
-            if w <= 1:
-                w = 800
-            if h <= 1:
-                h = 600
-
-            # Crear widget WebView2 dentro del contenedor
-            self.webview = WebView2(self.browser_container, width=w, height=h, url=HIK_CONNECT_URL)
-            self.webview.pack(fill=tk.BOTH, expand=True)
-
-            self.log_message("✓ Navegador WebView2 iniciado correctamente (tiempo real)")
-
-        except Exception as e:
-            self.log_message(f"❌ Error al iniciar WebView2: {e}")
-            # Mostrar error en la interfaz
-            error_label = tk.Label(self.browser_container,
-                text=f"Error al iniciar navegador WebView2:\n{str(e)}\n\nInstale tkwebview2: pip install tkwebview2",
-                bg="black", fg="red", font=("Arial", 12), wraplength=500)
-            error_label.pack(expand=True)
-
-    # =============================================
-    # Selenium - Fallback para sistemas sin WebView2
-    # =============================================
     def init_selenium(self):
         try:
-            self.log_message("🌐 Iniciando navegador Chrome (Selenium fallback)...")
+            self.log_message("🌐 Iniciando navegador Chrome...")
             chrome_options = Options()
 
             # Crear carpeta temporal para perfil de Chrome
@@ -218,36 +160,45 @@ class WeightMonitor:
             if not os.path.exists(temp_profile):
                 os.makedirs(temp_profile)
 
-            # Configurar Chrome con perfil temporal persistente
+            # Configurar Chrome optimizado para capturas rápidas
             chrome_options.add_argument(f"--user-data-dir={temp_profile}")
             chrome_options.add_argument("--start-maximized")
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
+            # Optimizaciones para rendimiento de capturas
+            chrome_options.add_argument("--disable-gpu-sandbox")
+            chrome_options.add_argument("--disable-extensions")
+            chrome_options.add_argument("--disable-background-timer-throttling")
+            chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+            chrome_options.add_argument("--disable-renderer-backgrounding")
             chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
             chrome_options.add_experimental_option('useAutomationExtension', False)
 
             self.log_message(f"✓ Usando perfil: {temp_profile}")
-
-            # Crear Canvas para mostrar screenshots (fallback)
-            self.browser_canvas = tk.Canvas(self.browser_container, bg="black", highlightthickness=0)
-            self.browser_canvas.pack(fill=tk.BOTH, expand=True)
 
             # Usar webdriver-manager para descargar automáticamente ChromeDriver
             self.driver = webdriver.Chrome(
                 service=Service(ChromeDriverManager().install()),
                 options=chrome_options
             )
+
+            # Configurar ventana del navegador a un tamaño fijo para capturas eficientes
+            self.driver.set_window_size(960, 540)
             self.driver.get(HIK_CONNECT_URL)
 
-            self.log_message("✓ Navegador Chrome iniciado (modo screenshot cada 1s)")
-            self.update_browser_view()
+            self.log_message(f"✓ Navegador iniciado (~{1000 // BROWSER_REFRESH_MS} FPS)")
+
+            # Iniciar hilo de captura en segundo plano
+            self.browser_running = True
+            self.screenshot_thread = threading.Thread(target=self._screenshot_worker, daemon=True)
+            self.screenshot_thread.start()
+
+            # Iniciar actualización de la UI
+            self._update_canvas()
 
         except Exception as e:
             self.log_message(f"❌ Error al iniciar Selenium: {e}")
-            if not hasattr(self, 'browser_canvas'):
-                self.browser_canvas = tk.Canvas(self.browser_container, bg="black", highlightthickness=0)
-                self.browser_canvas.pack(fill=tk.BOTH, expand=True)
             self.browser_canvas.delete("all")
             self.browser_canvas.create_text(
                 self.browser_canvas.winfo_width()//2,
@@ -257,42 +208,51 @@ class WeightMonitor:
                 font=("Arial", 12)
             )
 
-    def update_browser_view(self):
-        """Actualización por screenshots (solo se usa con Selenium fallback)"""
-        try:
-            if self.driver:
-                # Forzar actualización de geometría
-                self.root.update_idletasks()
+    def _screenshot_worker(self):
+        """Hilo dedicado a capturar screenshots sin bloquear la UI"""
+        while self.browser_running and self.driver:
+            try:
+                # Capturar screenshot en el hilo de fondo
+                screenshot_data = self.driver.get_screenshot_as_png()
+                image = Image.open(io.BytesIO(screenshot_data))
 
-                # Obtener dimensiones actuales del canvas
-                canvas_width = self.browser_canvas.winfo_width()
-                canvas_height = self.browser_canvas.winfo_height()
+                # Obtener tamaño del canvas (thread-safe read)
+                try:
+                    cw = self.browser_canvas.winfo_width()
+                    ch = self.browser_canvas.winfo_height()
+                except:
+                    cw, ch = 800, 600
 
-                # Si el canvas aún no tiene dimensiones válidas, esperar y reintentar
-                if canvas_width <= 1 or canvas_height <= 1:
-                    self.root.after(500, self.update_browser_view)
-                    return
+                if cw > 1 and ch > 1:
+                    # Usar BILINEAR para redimensionar más rápido que LANCZOS
+                    image = image.resize((cw, ch), Image.BILINEAR)
+                    photo = ImageTk.PhotoImage(image)
 
-                # Capturar pantalla del navegador
-                screenshot = self.driver.get_screenshot_as_png()
-                image = Image.open(io.BytesIO(screenshot))
+                    with self._screenshot_lock:
+                        self._latest_photo = photo
 
-                # Redimensionar para llenar todo el espacio disponible
-                image = image.resize((canvas_width, canvas_height), Image.LANCZOS)
-                photo = ImageTk.PhotoImage(image)
+                # Esperar antes de la siguiente captura
+                time.sleep(BROWSER_REFRESH_MS / 1000.0)
 
-                # Limpiar canvas y dibujar imagen
-                self.browser_canvas.delete("all")
-                self.browser_canvas.create_image(0, 0, image=photo, anchor=tk.NW)
-                self.browser_canvas.image = photo  # Mantener referencia
+            except Exception:
+                time.sleep(0.5)
 
-                self.root.after(1000, self.update_browser_view)
-        except Exception as e:
-            self.log_message(f"⚠ Error al actualizar vista del navegador: {e}")
+    def _update_canvas(self):
+        """Actualiza el canvas con la última captura disponible (corre en el hilo principal)"""
+        if not self.browser_running:
+            return
 
-    # =============================================
-    # Puertos seriales
-    # =============================================
+        with self._screenshot_lock:
+            photo = self._latest_photo
+
+        if photo:
+            self.browser_canvas.delete("all")
+            self.browser_canvas.create_image(0, 0, image=photo, anchor=tk.NW)
+            self.browser_canvas.image = photo
+
+        # Programar siguiente actualización del canvas (cada 50ms = 20 FPS de UI)
+        self.root.after(50, self._update_canvas)
+
     def force_free_selected_port(self):
         """Liberar específicamente el puerto seleccionado de forma AGRESIVA"""
         port = self.port_combo.get()
@@ -755,15 +715,18 @@ class WeightMonitor:
         """Limpia todas las conexiones al cerrar la aplicación"""
         self.log_message("🔄 Cerrando aplicación y liberando recursos...")
 
+        # Detener hilo de capturas
+        self.browser_running = False
+
         # Desconectar puerto serial
         if self.is_running:
             self.disconnect()
 
-        # Cerrar navegador Selenium si se usó como fallback
+        # Cerrar navegador
         if self.driver:
             try:
                 self.driver.quit()
-                self.log_message("✓ Navegador Selenium cerrado")
+                self.log_message("✓ Navegador cerrado")
             except:
                 pass
 
