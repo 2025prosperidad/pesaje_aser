@@ -23,7 +23,7 @@ BROWSER_REFRESH_MS = 200
 class WeightMonitor:
     def __init__(self, root):
         self.root = root
-        self.root.title("Monitor de Peso - Hik-Connect")
+        self.root.title("Monitor de Peso - Hik-Connect [FIXED]")
         self.root.geometry("1600x900")
         self.root.configure(bg="#1e1e1e")
 
@@ -35,9 +35,11 @@ class WeightMonitor:
         self.browser_running = False
         self._screenshot_lock = threading.Lock()
         self._latest_photo = None
+        self._screenshot_errors = 0
+        self._last_screenshot_time = time.time()
 
         self.setup_ui()
-        self.log_message("=== INICIANDO APLICACIÓN ===")
+        self.log_message("=== INICIANDO APLICACIÓN [VERSIÓN CORREGIDA] ===")
         self.root.after(1000, self.init_selenium)
 
     def setup_ui(self):
@@ -128,12 +130,17 @@ class WeightMonitor:
         right_container = tk.Frame(main_horizontal_frame, bg="#2d2d2d")
         right_container.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        # Título
+        # Título con indicador de FPS
         title_frame = tk.Frame(right_container, bg="#2d2d2d", height=30)
         title_frame.pack(fill=tk.X, side=tk.TOP)
         title_frame.pack_propagate(False)
+        
         tk.Label(title_frame, text="Hik-Connect - Tiempo Real",
-                bg="#2d2d2d", fg="white", font=("Arial", 11, "bold")).pack(pady=5)
+                bg="#2d2d2d", fg="white", font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=10, pady=5)
+        
+        self.fps_label = tk.Label(title_frame, text="FPS: --",
+                                 bg="#2d2d2d", fg="#00ff00", font=("Arial", 9))
+        self.fps_label.pack(side=tk.RIGHT, padx=10)
 
         # Área para mostrar el navegador embebido
         self.browser_canvas = tk.Canvas(right_container, bg="black", highlightthickness=0)
@@ -154,33 +161,84 @@ class WeightMonitor:
             self.log_message("🌐 Iniciando navegador Chrome...")
             chrome_options = Options()
 
-            # Configurar Chrome optimizado para capturas rápidas
-            chrome_options.add_argument("--start-maximized")
-            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            # Optimizaciones para rendimiento de capturas
-            chrome_options.add_argument("--disable-gpu-sandbox")
-            chrome_options.add_argument("--disable-extensions")
+            # ============================================
+            # CONFIGURACIONES CRÍTICAS PARA BACKGROUND
+            # ============================================
+            
+            # Evitar que Chrome reduzca rendimiento cuando no está en foco
             chrome_options.add_argument("--disable-background-timer-throttling")
             chrome_options.add_argument("--disable-backgrounding-occluded-windows")
             chrome_options.add_argument("--disable-renderer-backgrounding")
+            chrome_options.add_argument("--disable-ipc-flooding-protection")
+            chrome_options.add_argument("--disable-hang-monitor")
+            
+            # CRÍTICO: Evitar que Windows detecte la ventana como "oculta"
+            chrome_options.add_argument("--disable-features=CalculateNativeWinOcclusion")
+            
+            # Configuraciones de rendimiento
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-gpu-sandbox")
+            chrome_options.add_argument("--disable-extensions")
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            
+            # Evitar detección de automatización
             chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
             chrome_options.add_experimental_option('useAutomationExtension', False)
+            
+            # Preferencias para mantener contenido activo
+            prefs = {
+                "profile.default_content_setting_values.notifications": 2,
+                "profile.managed_default_content_settings.images": 1,
+                # Evitar suspensión de pestañas
+                "profile.content_settings.exceptions.automatic_downloads.*.setting": 1
+            }
+            chrome_options.add_experimental_option("prefs", prefs)
 
-            # Selenium 4+ detecta y descarga automáticamente el ChromeDriver correcto
+            # Iniciar navegador
             self.driver = webdriver.Chrome(options=chrome_options)
 
-            # Configurar ventana del navegador a un tamaño fijo para capturas eficientes
+            # Configurar ventana (NO maximizar, usar tamaño fijo)
             self.driver.set_window_size(960, 540)
+            
+            # CRÍTICO: Inyectar JavaScript para mantener página activa
+            self.driver.execute_cdp_cmd('Page.setWebLifecycleState', {
+                'state': 'active',
+            })
+            
             self.driver.get(HIK_CONNECT_URL)
+            
+            # Inyectar script para prevenir suspensión
+            self.driver.execute_script("""
+                // Prevenir que la página entre en estado idle
+                setInterval(function() {
+                    // Disparar evento de actividad sin interferir con la UI
+                    document.dispatchEvent(new Event('touchstart'));
+                }, 2000);
+                
+                // Mantener video activo
+                setInterval(function() {
+                    var videos = document.querySelectorAll('video');
+                    videos.forEach(function(v) {
+                        if (v.paused && v.readyState >= 2) {
+                            v.play().catch(function(){});
+                        }
+                    });
+                }, 1000);
+            """)
 
             self.log_message(f"✓ Navegador iniciado (~{1000 // BROWSER_REFRESH_MS} FPS)")
 
-            # Iniciar hilo de captura en segundo plano
+            # Iniciar hilos de captura
             self.browser_running = True
+            
+            # Hilo de captura de screenshots
             self.screenshot_thread = threading.Thread(target=self._screenshot_worker, daemon=True)
             self.screenshot_thread.start()
+            
+            # Hilo de keep-alive para el navegador
+            self.keepalive_thread = threading.Thread(target=self._keepalive_worker, daemon=True)
+            self.keepalive_thread.start()
 
             # Iniciar actualización de la UI
             self._update_canvas()
@@ -196,11 +254,38 @@ class WeightMonitor:
                 font=("Arial", 12)
             )
 
-    def _screenshot_worker(self):
-        """Hilo dedicado a capturar screenshots sin bloquear la UI"""
+    def _keepalive_worker(self):
+        """Thread dedicado a mantener el navegador activo en background"""
         while self.browser_running and self.driver:
             try:
-                # Capturar screenshot en el hilo de fondo
+                # Ejecutar JavaScript cada 5 segundos para mantener la página activa
+                self.driver.execute_script("return document.title;")
+                
+                # Mantener el estado de la pestaña como activo
+                try:
+                    self.driver.execute_cdp_cmd('Page.setWebLifecycleState', {
+                        'state': 'active',
+                    })
+                except:
+                    pass
+                
+                time.sleep(5)
+            except Exception as e:
+                if self.browser_running:
+                    self.log_message(f"⚠ Keep-alive error: {str(e)[:50]}")
+                time.sleep(5)
+
+    def _screenshot_worker(self):
+        """Hilo dedicado a capturar screenshots sin bloquear la UI - VERSION MEJORADA"""
+        consecutive_errors = 0
+        last_fps_update = time.time()
+        frame_count = 0
+        
+        while self.browser_running and self.driver:
+            try:
+                start_time = time.time()
+                
+                # Capturar screenshot con timeout implícito
                 screenshot_data = self.driver.get_screenshot_as_png()
                 image = Image.open(io.BytesIO(screenshot_data))
 
@@ -212,18 +297,52 @@ class WeightMonitor:
                     cw, ch = 800, 600
 
                 if cw > 1 and ch > 1:
-                    # Usar BILINEAR para redimensionar más rápido que LANCZOS
+                    # Usar BILINEAR para redimensionar más rápido
                     image = image.resize((cw, ch), Image.BILINEAR)
                     photo = ImageTk.PhotoImage(image)
 
                     with self._screenshot_lock:
                         self._latest_photo = photo
+                        self._last_screenshot_time = time.time()
+                
+                # Resetear contador de errores en captura exitosa
+                consecutive_errors = 0
+                
+                # Calcular y actualizar FPS
+                frame_count += 1
+                if time.time() - last_fps_update >= 1.0:
+                    fps = frame_count / (time.time() - last_fps_update)
+                    try:
+                        self.root.after(0, lambda f=fps: self.fps_label.config(
+                            text=f"FPS: {f:.1f}",
+                            fg="#00ff00" if f > 3 else "#ffaa00" if f > 1 else "#ff4444"
+                        ))
+                    except:
+                        pass
+                    frame_count = 0
+                    last_fps_update = time.time()
+                
+                # Calcular tiempo de espera dinámico
+                elapsed = time.time() - start_time
+                sleep_time = max(0, (BROWSER_REFRESH_MS / 1000.0) - elapsed)
+                
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
-                # Esperar antes de la siguiente captura
-                time.sleep(BROWSER_REFRESH_MS / 1000.0)
-
-            except Exception:
-                time.sleep(0.5)
+            except Exception as e:
+                consecutive_errors += 1
+                
+                # Si hay muchos errores consecutivos, aumentar el tiempo de espera
+                if consecutive_errors > 5:
+                    self.log_message(f"⚠ Screenshot worker: {consecutive_errors} errores consecutivos")
+                    time.sleep(1)
+                else:
+                    time.sleep(0.5)
+                
+                # Si hay demasiados errores, puede que el navegador se haya cerrado
+                if consecutive_errors > 20:
+                    self.log_message("❌ Screenshot worker: Demasiados errores, deteniendo...")
+                    break
 
     def _update_canvas(self):
         """Actualiza el canvas con la última captura disponible (corre en el hilo principal)"""
@@ -232,11 +351,23 @@ class WeightMonitor:
 
         with self._screenshot_lock:
             photo = self._latest_photo
+            last_update = self._last_screenshot_time
 
         if photo:
             self.browser_canvas.delete("all")
             self.browser_canvas.create_image(0, 0, image=photo, anchor=tk.NW)
             self.browser_canvas.image = photo
+            
+            # Mostrar advertencia si la última captura es muy antigua
+            time_since_update = time.time() - last_update
+            if time_since_update > 2:
+                self.browser_canvas.create_text(
+                    10, 10,
+                    text=f"⚠ Sin actualización por {time_since_update:.1f}s",
+                    fill="yellow",
+                    anchor=tk.NW,
+                    font=("Arial", 10, "bold")
+                )
 
         # Programar siguiente actualización del canvas (cada 50ms = 20 FPS de UI)
         self.root.after(50, self._update_canvas)
@@ -703,7 +834,7 @@ class WeightMonitor:
         """Limpia todas las conexiones al cerrar la aplicación"""
         self.log_message("🔄 Cerrando aplicación y liberando recursos...")
 
-        # Detener hilo de capturas
+        # Detener hilos de capturas
         self.browser_running = False
 
         # Desconectar puerto serial
